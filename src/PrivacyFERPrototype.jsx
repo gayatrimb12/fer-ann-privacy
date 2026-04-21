@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FaceLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 
 const MODEL_ASSET_PATH =
   "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
@@ -28,8 +27,7 @@ const CONNECTIONS = [
   [81, 82], [82, 13], [13, 312], [312, 311], [311, 310], [310, 415], [415, 308],
 
   [168, 6], [6, 197], [197, 195], [195, 5], [5, 4], [4, 1], [1, 19],
-  [19, 94], [94, 2], [2, 164], [164, 0], [0, 11], [11, 12], [12, 13],
-  [13, 14]
+  [19, 94], [94, 2], [2, 164], [164, 0], [0, 11], [11, 12], [12, 13], [13, 14]
 ];
 
 function clamp(value, min, max) {
@@ -38,15 +36,17 @@ function clamp(value, min, max) {
 
 function shiftPoint(x, y, index, noiseAmount) {
   if (!noiseAmount) return { x, y };
+
   const dx = ((index % 5) - 2) * noiseAmount * 0.0012;
   const dy = (((index + 2) % 5) - 2) * noiseAmount * 0.0012;
+
   return {
     x: clamp(x + dx, 0, 1),
     y: clamp(y + dy, 0, 1),
   };
 }
 
-function StatusPill({ label, active, warning = false }) {
+function StatusPill({ label, active = false, warning = false }) {
   const bg = warning ? "#fff7ed" : active ? "#eff6ff" : "#f8fafc";
   const color = warning ? "#c2410c" : active ? "#1d4ed8" : "#475569";
   const border = warning ? "#fdba74" : active ? "#bfdbfe" : "#e2e8f0";
@@ -65,6 +65,29 @@ function StatusPill({ label, active, warning = false }) {
       }}
     >
       {label}
+    </div>
+  );
+}
+
+function MetricCard({ label, value, subtext }) {
+  return (
+    <div
+      style={{
+        background: "#ffffff",
+        border: "1px solid #e2e8f0",
+        borderRadius: "18px",
+        padding: "16px",
+      }}
+    >
+      <div style={{ color: "#64748b", fontSize: "0.86rem", marginBottom: "8px" }}>
+        {label}
+      </div>
+      <div style={{ fontWeight: 800, fontSize: "1.4rem", marginBottom: "6px" }}>
+        {value}
+      </div>
+      <div style={{ color: "#475569", fontSize: "0.92rem", lineHeight: 1.6 }}>
+        {subtext}
+      </div>
     </div>
   );
 }
@@ -95,14 +118,29 @@ export default function PrivacyFERPrototype() {
     return "Face detected · graph generated";
   }, [cameraOn, modelReady, faceDetected]);
 
+  const exposureLevel = privacyMode ? "Reduced" : "Visible";
+
   useEffect(() => {
     let cancelled = false;
 
     async function loadLandmarker() {
       try {
         setIsLoadingModel(true);
-        const vision = await FilesetResolver.forVisionTasks(WASM_PATH);
-        const faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+        setErrorMessage("");
+
+        const vision = await import(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm"
+        );
+
+        const { FaceLandmarker, FilesetResolver } = vision;
+
+        if (!FaceLandmarker || !FilesetResolver) {
+          throw new Error("MediaPipe module failed to load properly.");
+        }
+
+        const fileset = await FilesetResolver.forVisionTasks(WASM_PATH);
+
+        const faceLandmarker = await FaceLandmarker.createFromOptions(fileset, {
           baseOptions: {
             modelAssetPath: MODEL_ASSET_PATH,
             delegate: "GPU",
@@ -125,7 +163,7 @@ export default function PrivacyFERPrototype() {
         console.error(error);
         if (!cancelled) {
           setErrorMessage(
-            "Could not load the face landmark model. Check your internet connection and redeploy."
+            "Could not load the face landmark model. Refresh the page and try again."
           );
         }
       } finally {
@@ -139,15 +177,26 @@ export default function PrivacyFERPrototype() {
 
     return () => {
       cancelled = true;
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+      }
     };
   }, []);
 
-  useEffect(() => {
-    return () => {
-      stopCamera();
-      if (animationRef.current) cancelAnimationFrame(animationRef.current);
-    };
-  }, []);
+  const clearCanvas = () => {
+    const canvas = graphCanvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#94a3b8";
+    ctx.font = "600 18px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("Graph view inactive", canvas.width / 2, canvas.height / 2);
+  };
 
   const stopCamera = () => {
     if (animationRef.current) cancelAnimationFrame(animationRef.current);
@@ -172,12 +221,14 @@ export default function PrivacyFERPrototype() {
     if (canvas) {
       const ctx = canvas.getContext("2d");
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      clearCanvas();
     }
   };
 
   const startCamera = async () => {
     try {
       setErrorMessage("");
+
       if (!modelReady) {
         setErrorMessage("The face landmark model is still loading.");
         return;
@@ -205,6 +256,12 @@ export default function PrivacyFERPrototype() {
       setCameraOn(true);
       lastTimeRef.current = -1;
 
+      const canvas = graphCanvasRef.current;
+      if (canvas) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+
       runInference();
     } catch (error) {
       console.error(error);
@@ -231,7 +288,7 @@ export default function PrivacyFERPrototype() {
 
     if (!landmarks || landmarks.length === 0) {
       ctx.fillStyle = "#94a3b8";
-      ctx.font = "600 18px Inter, Arial, sans-serif";
+      ctx.font = "600 18px Arial";
       ctx.textAlign = "center";
       ctx.fillText("Waiting for face landmarks", width / 2, height / 2);
       return;
@@ -244,6 +301,8 @@ export default function PrivacyFERPrototype() {
     ctx.globalAlpha = 0.82;
 
     for (const [a, b] of CONNECTIONS) {
+      if (!face[a] || !face[b]) continue;
+
       const p1 = shiftPoint(face[a].x, face[a].y, a, noiseLevel);
       const p2 = shiftPoint(face[b].x, face[b].y, b, noiseLevel);
 
@@ -264,9 +323,9 @@ export default function PrivacyFERPrototype() {
     }
 
     ctx.fillStyle = "rgba(37,99,235,0.08)";
-    ctx.fillRect(16, 16, 196, 34);
+    ctx.fillRect(16, 16, 212, 34);
     ctx.fillStyle = "#1d4ed8";
-    ctx.font = "700 14px Inter, Arial, sans-serif";
+    ctx.font = "700 14px Arial";
     ctx.textAlign = "left";
     ctx.fillText("privacy-aware graph abstraction", 28, 38);
   };
@@ -331,9 +390,18 @@ export default function PrivacyFERPrototype() {
             gap: "10px",
           }}
         >
-          <StatusPill label={isLoadingModel ? "Loading model" : "Model ready"} active={modelReady} />
-          <StatusPill label={cameraOn ? "Camera active" : "Camera inactive"} active={cameraOn} />
-          <StatusPill label={faceDetected ? "Face detected" : "No face"} active={faceDetected} />
+          <StatusPill
+            label={isLoadingModel ? "Loading model" : "Model ready"}
+            active={modelReady}
+          />
+          <StatusPill
+            label={cameraOn ? "Camera active" : "Camera inactive"}
+            active={cameraOn}
+          />
+          <StatusPill
+            label={faceDetected ? "Face detected" : "No face"}
+            active={faceDetected}
+          />
           <StatusPill
             label={privacyMode ? "Privacy mode on" : "Privacy mode off"}
             active={privacyMode}
@@ -420,7 +488,13 @@ export default function PrivacyFERPrototype() {
               >
                 System summary
               </div>
-              <div style={{ fontWeight: 700, fontSize: "1.05rem", marginBottom: "10px" }}>
+              <div
+                style={{
+                  fontWeight: 700,
+                  fontSize: "1.05rem",
+                  marginBottom: "10px",
+                }}
+              >
                 {systemSummary}
               </div>
               <div style={{ fontSize: "0.95rem", color: "#475569", lineHeight: 1.7 }}>
@@ -623,7 +697,9 @@ export default function PrivacyFERPrototype() {
               }}
             >
               <div style={{ marginBottom: "12px" }}>
-                <div style={{ fontWeight: 700, fontSize: "1rem" }}>Graph abstraction panel</div>
+                <div style={{ fontWeight: 700, fontSize: "1rem" }}>
+                  Graph abstraction panel
+                </div>
                 <div style={{ color: "#64748b", fontSize: "0.9rem", marginTop: "4px" }}>
                   Structural representation for downstream analysis
                 </div>
@@ -659,63 +735,26 @@ export default function PrivacyFERPrototype() {
             gap: "16px",
           }}
         >
-          <div
-            style={{
-              background: "#ffffff",
-              border: "1px solid #e2e8f0",
-              borderRadius: "20px",
-              padding: "18px",
-            }}
-          >
-            <div style={{ color: "#64748b", fontSize: "0.88rem", marginBottom: "8px" }}>
-              Stage 1
-            </div>
-            <div style={{ fontWeight: 700 }}>Face region acquired</div>
-          </div>
-
-          <div
-            style={{
-              background: "#ffffff",
-              border: "1px solid #e2e8f0",
-              borderRadius: "20px",
-              padding: "18px",
-            }}
-          >
-            <div style={{ color: "#64748b", fontSize: "0.88rem", marginBottom: "8px" }}>
-              Stage 2
-            </div>
-            <div style={{ fontWeight: 700 }}>Landmarks extracted</div>
-          </div>
-
-          <div
-            style={{
-              background: "#ffffff",
-              border: "1px solid #e2e8f0",
-              borderRadius: "20px",
-              padding: "18px",
-            }}
-          >
-            <div style={{ color: "#64748b", fontSize: "0.88rem", marginBottom: "8px" }}>
-              Stage 3
-            </div>
-            <div style={{ fontWeight: 700 }}>Graph representation built</div>
-          </div>
-
-          <div
-            style={{
-              background: "#ffffff",
-              border: "1px solid #e2e8f0",
-              borderRadius: "20px",
-              padding: "18px",
-            }}
-          >
-            <div style={{ color: "#64748b", fontSize: "0.88rem", marginBottom: "8px" }}>
-              Stage 4
-            </div>
-            <div style={{ fontWeight: 700 }}>
-              {privacyMode ? "Raw exposure reduced" : "Raw exposure visible"}
-            </div>
-          </div>
+          <MetricCard
+            label="System summary"
+            value={systemSummary}
+            subtext="Current pipeline state."
+          />
+          <MetricCard
+            label="Landmarks"
+            value={landmarkCount}
+            subtext="Detected structural points."
+          />
+          <MetricCard
+            label="Graph quality"
+            value={`${graphQuality}%`}
+            subtext="Approximate structural stability under noise."
+          />
+          <MetricCard
+            label="Identity exposure"
+            value={exposureLevel}
+            subtext="Raw input visibility level."
+          />
         </div>
       </div>
     </div>
